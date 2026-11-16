@@ -1,0 +1,13 @@
+- insert:
+    - id: workflow-zcode
+      name: 'dsh-workflow-zcode'
+      config:
+        runToolName: run_zcode_workflow
+        listToolName: list_zcode_workflows
+        typeCheck: true
+        maxTotalAgents: 200
+        # Simultaneous subagent turns (the origin's 最大并发数), NOT the lifetime
+        # agent ceiling above. Users can override it per run from the panel.
+        maxConcurrency: 13
+        # '' or 'session' = follow the calling session's model.
+        subagentModel: ''

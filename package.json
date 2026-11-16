@@ -1,0 +1,70 @@
+{
+  "name": "dsh-workflow-zcode",
+  "version": "0.2.0",
+  "type": "module",
+  "description": "A DeepSeek Harness plugin that runs ZCode .dwf.ts dynamic workflows with sandboxed execution, persistent subagents, a resumable SQLite journal, and a ZCode-style sidebar panel.",
+  "exports": {
+    ".": "./index.mjs",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "client.js",
+    "src/*.mjs",
+    "src/engine/*.mjs",
+    "facade.d.ts",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
+      ]
+    }
+  },
+  "dependencies": {
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22",
+    "dsh": ">=0.2.1-rc.2 <0.3.0"
+  },
+  "license": "MIT",
+  "author": "qiaozhao",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "workflow",
+    "zcode"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/google-q-dot/dsh-workflow-zcode.git"
+  },
+  "homepage": "https://github.com/google-q-dot/dsh-workflow-zcode#readme",
+  "bugs": {
+    "url": "https://github.com/google-q-dot/dsh-workflow-zcode/issues"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "prepare-publish": "node scripts/prepare-publish.mjs"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "ZCode Workflows",
+    "description": "Compile and run ZCode dynamic workflows (.dwf.ts) on the DSH workflow engine, with typed subagent results, phases, reports and markdown deliverables."
+  }
+}

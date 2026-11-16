@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "ZCode 工作流",
+    "description": "在 DSH 工作流引擎上编译并运行 ZCode 动态工作流（.dwf.ts），支持类型化子代理结果、阶段、报告与 Markdown 交付物。"
+  }
+}
