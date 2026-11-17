@@ -51,6 +51,7 @@ export const inject = {
   sessions: { required: false },
   workingDirectory: { required: false },
   connection: { required: false },
+  userQuestions: { required: false },
 }
 
 const DEFAULTS = {
@@ -58,6 +59,7 @@ const DEFAULTS = {
   listToolName: 'list_zcode_workflows',
   resumeToolName: 'resume_zcode_workflow',
   typeCheck: true,
+  confirmExecution: 'ask',
   maxTotalAgents: 200,
   // The origin's 最大并发数: simultaneous subagent turns, NOT the lifetime
   // agent ceiling. 13 is the dashboard's default; users can change it per run.
@@ -109,6 +111,7 @@ export function apply(ctx, config = {}) {
     listToolName: String(merged.listToolName),
     resumeToolName: String(merged.resumeToolName),
     typeCheck: merged.typeCheck !== false,
+    confirmExecution: resolveConfirmExecution(merged.confirmExecution),
     maxTotalAgents: Number(merged.maxTotalAgents ?? 200),
     maxConcurrency: Number(merged.maxConcurrency ?? 13),
     subagentModel: typeof merged.subagentModel === 'string' ? merged.subagentModel : '',
@@ -160,6 +163,7 @@ export function apply(ctx, config = {}) {
       if (set.size === 0) runsBySession.delete(parentSessionId)
     }
   }
+  const tracking = { trackRun, untrackRun, activeRuns }
 
   // Archiving or stopping a session must stop the work it started: the subagent
   // sessions this plugin owns hold write locks, and nothing else would end them.
@@ -182,6 +186,10 @@ export function apply(ctx, config = {}) {
   const store = createTraceStore(journal)
   registerRunRoutes(ctx, store, {
     activeRuns,
+    sessionPolicy: {
+      get: (sessionId) => journal.isSessionAutoApproved(sessionId),
+      set: (sessionId, enabled) => journal.setSessionAutoApprove(sessionId, enabled),
+    },
     launcher: {
       resume: (runId, overrides) => startResumeFromUi({ ctx, settings, journal, tracking, runId, overrides }),
       configure: (runId, overrides) => configureRunFromUi({ ctx, settings, journal, tracking, runId, overrides }),
@@ -343,26 +351,53 @@ async function resumeWorkflowTool(ctx, settings, journal, tracking, args, exec) 
   }
 
   // Per-call overrides become part of the stored plan, exactly like the UI's
-  // configure action, so a later resume keeps them.
+  // configure action, so a later resume keeps them. Validate before confirming
+  // so an unapproved resume leaves the journal untouched.
   const overrides = {}
   if (args?.max_concurrency !== undefined) overrides.maxConcurrency = args.max_concurrency
   if (typeof args?.subagent_model === 'string' && args.subagent_model.trim() !== '') {
     overrides.subagentModel = args.subagent_model
   }
-  let effectivePlan = run.plan
+  let mergedOverrides
+  let candidatePlan = run.plan
   if (Object.keys(overrides).length > 0) {
-    let merged
     try {
-      merged = applyPlanSettings(run.plan, overrides)
+      mergedOverrides = applyPlanSettings(run.plan, overrides)
     } catch (error) {
       return { error: { message: messageOf(error) } }
     }
-    if (merged.changes.length > 0) {
-      effectivePlan = merged.plan
-      journal.updatePlan(runId, effectivePlan)
-      journal.setRunCaps(runId, effectivePlan.maxConcurrency ?? run.capsMaxConcurrency)
-      journal.appendEvent(runId, 'run-configured', { at: Date.now(), origin: 'tool', changes: merged.changes })
-    }
+    if (mergedOverrides.changes.length > 0) candidatePlan = mergedOverrides.plan
+  }
+
+  const confirmation = await confirmWorkflowExecution({
+    ctx,
+    settings,
+    journal,
+    exec,
+    parentAgent,
+    mode: 'resume',
+    workflowId: run.name ?? 'zcode-workflow',
+    runId,
+    resumeCount: run.resumeCount ?? 0,
+    sourcePath: candidatePlan.sourcePath ?? null,
+    directory: run.cwd,
+    description: candidatePlan.description ?? null,
+    phases: candidatePlan.phases ?? compiled.phases ?? [],
+    actors: candidatePlan.actors ?? compiled.actors ?? [],
+    commands: compiled.commands ?? [],
+    args: run.args,
+    maxConcurrency: candidatePlan.maxConcurrency ?? run.capsMaxConcurrency ?? settings.maxConcurrency,
+    subagentModel: candidatePlan.subagentModel ?? resolveSubagentModel(settings.subagentModel),
+    source: run.plan.source,
+  })
+  if (confirmation.approved !== true) return confirmation.result
+
+  let effectivePlan = run.plan
+  if (mergedOverrides !== undefined && mergedOverrides.changes.length > 0) {
+    effectivePlan = mergedOverrides.plan
+    journal.updatePlan(runId, effectivePlan)
+    journal.setRunCaps(runId, effectivePlan.maxConcurrency ?? run.capsMaxConcurrency)
+    journal.appendEvent(runId, 'run-configured', { at: Date.now(), origin: 'tool', changes: mergedOverrides.changes })
   }
 
   const actors = journal.listActors(runId)
@@ -634,6 +669,28 @@ async function runWorkflowTool(ctx, settings, journal, tracking, args, exec) {
   if (subagentModel.mode === 'invalid') {
     return { error: { message: subagentModel.message } }
   }
+
+  const confirmation = await confirmWorkflowExecution({
+    ctx,
+    settings,
+    journal,
+    exec,
+    parentAgent,
+    mode: 'run',
+    workflowId,
+    sourcePath: sourcePath ?? null,
+    directory,
+    description: typeof meta?.description === 'string' ? meta.description : null,
+    phases: compiled.phases ?? [],
+    actors: compiled.actors ?? [],
+    commands: compiled.commands ?? [],
+    args: resolvedArgs,
+    maxConcurrency,
+    subagentModel,
+    source: body,
+  })
+  if (confirmation.approved !== true) return confirmation.result
+
   const plan = {
     // Everything a later resume needs, stored once so it never depends on the
     // original file still existing or on the caller re-sending the script.
@@ -755,6 +812,236 @@ function resolveSubagentModel(value) {
     return { mode: 'invalid', message: `subagent_model must be "session" or "provider/model", got "${text}"` }
   }
   return { mode: 'fixed', provider: text.slice(0, slash), model: text.slice(slash + 1), label: text }
+}
+
+const CONFIRM_QUESTION_ID = 'workflow_execution_confirm'
+const CONFIRM_OPTIONS = Object.freeze({
+  once: '允许这一次工作流执行',
+  session: '允许这个 Session 的所有工作流自动执行',
+  reject: '拒绝执行',
+})
+
+function resolveConfirmExecution(value) {
+  if (value === false || value === 'never' || value === 'off') return 'never'
+  return 'ask'
+}
+
+/**
+ * Format a compact Markdown summary + source snippet shown inside the pre-run
+ * confirmation card so the user can review what will run before approving.
+ */
+function buildWorkflowConfirmDetail({
+  mode,
+  workflowId,
+  runId,
+  resumeCount,
+  sourcePath,
+  directory,
+  description,
+  maxConcurrency,
+  subagentModel,
+  phases,
+  actors,
+  commands,
+  args,
+  source,
+}) {
+  const lines = []
+  lines.push(`- **工作流**：\`${workflowId}\`${description ? ` — ${description}` : ''}`)
+  lines.push(`- **来源**：${sourcePath ? `\`${sourcePath}\`` : '内联脚本（未落盘）'}`)
+  if (mode === 'resume' && runId) {
+    lines.push(`- **动作**：续跑运行 \`${runId}\`（已续跑 ${resumeCount ?? 0} 次）`)
+  }
+  if (directory) lines.push(`- **工作目录**：\`${directory}\``)
+  lines.push(`- **并发与模型**：最大并发 \`${maxConcurrency}\` · 子代理模型 \`${subagentModel?.label ?? '会话模型'}\``)
+
+  const phaseList = Array.isArray(phases) ? phases : []
+  if (phaseList.length > 0) {
+    const names = phaseList.slice(0, 8).map((p) => (
+      typeof p === 'string' ? `\`${p}\`` : `\`${p?.name ?? p?.title ?? '(动态阶段)'}\``
+    ))
+    lines.push(`- **阶段 (${phaseList.length})**：${names.join(' → ')}${phaseList.length > 8 ? ' → …' : ''}`)
+  }
+
+  const actorList = Array.isArray(actors) ? actors : []
+  if (actorList.length > 0) {
+    const names = actorList.slice(0, 8).map((a) => (
+      typeof a === 'string' ? `\`${a}\`` : `\`${a?.name ?? a?.id ?? 'subagent'}\``
+    ))
+    lines.push(`- **子代理 (${actorList.length})**：${names.join('、')}${actorList.length > 8 ? ` 等 ${actorList.length} 个` : ''}`)
+  }
+
+  const cmdList = Array.isArray(commands) ? commands : []
+  if (cmdList.length > 0) {
+    const preview = cmdList.slice(0, 6).map((c) => `\`${c}\``).join('、')
+    lines.push(`- **声明命令 (${cmdList.length})**：${preview}${cmdList.length > 6 ? ' 等' : ''}`)
+  }
+
+  if (args && typeof args === 'object' && Object.keys(args).length > 0) {
+    const serialized = JSON.stringify(args)
+    const clipped = serialized.length > 200 ? `${serialized.slice(0, 200)}…` : serialized
+    lines.push(`- **输入参数**：\`${clipped}\``)
+  }
+
+  if (typeof source === 'string' && source.trim() !== '') {
+    const allLines = source.split('\n')
+    const maxLines = 48
+    const maxChars = 2000
+    let body = allLines.slice(0, maxLines).join('\n')
+    let truncated = allLines.length > maxLines
+    if (body.length > maxChars) {
+      body = body.slice(0, maxChars)
+      truncated = true
+    }
+    const fence = body.includes('```') ? '~~~~' : '```'
+    lines.push('')
+    lines.push(`${fence}ts`)
+    lines.push(body)
+    if (truncated) lines.push(`// ...（共 ${allLines.length} 行，已截断预览）`)
+    lines.push(fence)
+  }
+
+  return lines.join('\n')
+}
+
+/**
+ * Ask the user whether a compiled workflow (new run or resume) should start.
+ * Allows once, session-wide auto-approval (persisted in SQLite), rejection,
+ * or free-form revision feedback entered in the QuestionFlow input box.
+ */
+async function confirmWorkflowExecution({
+  ctx,
+  settings,
+  journal,
+  exec,
+  parentAgent,
+  mode,
+  workflowId,
+  runId,
+  resumeCount,
+  sourcePath,
+  directory,
+  description,
+  phases,
+  actors,
+  commands,
+  args,
+  maxConcurrency,
+  subagentModel,
+  source,
+}) {
+  if (settings?.confirmExecution === 'never') return { approved: true, scope: 'config' }
+  if (journal?.isSessionAutoApproved?.(parentAgent?.id) === true) {
+    return { approved: true, scope: 'session' }
+  }
+
+  const userQuestions = ctx?.get?.('userQuestions') ?? ctx?.userQuestions
+  if (typeof userQuestions?.ask !== 'function') {
+    return { approved: true, scope: 'no-service' }
+  }
+
+  const declined = (confirmation) => ({
+    approved: false,
+    result: {
+      workflowId,
+      ...(runId === undefined ? {} : { runId }),
+      executed: false,
+      confirmation,
+    },
+  })
+
+  const header = mode === 'resume' ? '工作流续跑确认' : '工作流执行确认'
+  const actionText = mode === 'resume'
+    ? `工作流「${workflowId}」已准备好续跑，请确认是否继续执行（可在下方输入框直接填写修改意见）：`
+    : `工作流「${workflowId}」已编译完成，请确认是否开始执行（可在下方输入框直接填写修改意见）：`
+
+  const detail = buildWorkflowConfirmDetail({
+    mode,
+    workflowId,
+    runId,
+    resumeCount,
+    sourcePath,
+    directory,
+    description,
+    maxConcurrency,
+    subagentModel,
+    phases,
+    actors,
+    commands,
+    args,
+    source,
+  })
+
+  let response
+  try {
+    response = await userQuestions.ask({
+      agent: parentAgent,
+      ...(exec?.signal === undefined ? {} : { signal: exec.signal }),
+      questions: [
+        {
+          id: CONFIRM_QUESTION_ID,
+          header,
+          question: actionText,
+          detail,
+          multiSelect: false,
+          options: [
+            { label: CONFIRM_OPTIONS.once, description: '仅批准本次工作流运行，下次仍会弹出确认' },
+            { label: CONFIRM_OPTIONS.session, description: '批准本次并开启当前会话自动执行，后续不再询问' },
+            { label: CONFIRM_OPTIONS.reject, description: '不执行此工作流，等待你的下一步指令' },
+          ],
+        },
+      ],
+    })
+  } catch (error) {
+    const code = error?.code
+    if (code === 'ASK_CANCELLED') {
+      return declined({ decision: 'cancelled', reason: messageOf(error) })
+    }
+    if (code === 'ASK_ABORTED') {
+      return declined({ decision: 'aborted', reason: messageOf(error) })
+    }
+    if (code === 'NO_PROVIDER' || code === 'DELEGATED_CALLER' || code === 'CALLER_NOT_LIVE') {
+      return {
+        approved: false,
+        result: {
+          workflowId,
+          ...(runId === undefined ? {} : { runId }),
+          executed: false,
+          error: {
+            code: 'confirmation_unavailable',
+            message: `cannot confirm workflow execution (${code}): ${messageOf(error)}`,
+          },
+        },
+      }
+    }
+    return {
+      approved: false,
+      result: {
+        workflowId,
+        ...(runId === undefined ? {} : { runId }),
+        executed: false,
+        error: {
+          code: 'confirmation_failed',
+          message: `workflow confirmation failed: ${messageOf(error)}`,
+        },
+      },
+    }
+  }
+
+  const answer = response?.answers?.find((entry) => entry?.id === CONFIRM_QUESTION_ID) ?? response?.answers?.[0]
+  const feedback = typeof answer?.custom === 'string' ? answer.custom.trim() : ''
+  if (feedback !== '') {
+    return declined({ decision: 'revise', feedback })
+  }
+
+  const choice = Array.isArray(answer?.selected) ? answer.selected[0] : undefined
+  if (choice === CONFIRM_OPTIONS.once) return { approved: true, scope: 'once' }
+  if (choice === CONFIRM_OPTIONS.session) {
+    journal?.setSessionAutoApprove?.(parentAgent?.id, true)
+    return { approved: true, scope: 'session' }
+  }
+  if (choice === CONFIRM_OPTIONS.reject) return declined({ decision: 'rejected' })
+  return declined({ decision: 'skipped' })
 }
 
 /**
@@ -966,7 +1253,7 @@ function sessionOf(ctx, agent) {
  * routes keep that shape and project it from journal rows. That is deliberate:
  * the sidebar keeps working while the engine underneath changes.
  */
-function registerRunRoutes(ctx, store, { activeRuns, launcher } = {}) {
+function registerRunRoutes(ctx, store, { activeRuns, launcher, sessionPolicy } = {}) {
   ctx.inject?.(['connection'], (connectionCtx) => {
     const connection = connectionCtx.get?.('connection') ?? connectionCtx.connection
     const register = connection?.fetch?.register
@@ -1112,6 +1399,32 @@ function registerRunRoutes(ctx, store, { activeRuns, launcher } = {}) {
         }
       },
     }), 'dsh-workflow-zcode: delete route')
+
+    connectionCtx.effect?.(() => register({
+      path: '/api/dsh-workflow-zcode/session-policy',
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        try {
+          const body = await request.json().catch(() => ({}))
+          const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : ''
+          if (sessionId === '') {
+            return json({ ok: false, error: { code: 'bad-request', message: 'a sessionId is required' } })
+          }
+          if (typeof body?.autoApprove === 'boolean') {
+            if (sessionPolicy?.set === undefined) {
+              return json({ ok: false, error: { code: 'unavailable', message: 'session policy is not available' } })
+            }
+            const autoApprove = Boolean(await sessionPolicy.set(sessionId, body.autoApprove))
+            return json({ ok: true, value: { sessionId, autoApprove } })
+          }
+          const autoApprove = sessionPolicy?.get === undefined ? false : Boolean(await sessionPolicy.get(sessionId))
+          return json({ ok: true, value: { sessionId, autoApprove } })
+        } catch (error) {
+          return json({ ok: false, error: { code: 'session-policy-failed', message: messageOf(error) } })
+        }
+      },
+    }), 'dsh-workflow-zcode: session-policy route')
   })
 }
 
@@ -1222,6 +1535,24 @@ function renderEnvelope(value) {
         lines.push(`- ${entry.code} ${entry.line}:${entry.column} ${entry.message}`)
       }
     }
+    return lines.join('\n')
+  }
+
+  if (value?.confirmation !== undefined) {
+    const { decision, feedback, reason } = value.confirmation
+    const label = value.workflowId ?? 'workflow'
+    const suffix = value.runId === undefined ? '' : ` (run ${value.runId})`
+    if (decision === 'revise') {
+      lines.push(`ZCode workflow "${label}"${suffix} was NOT executed — user requested modifications before running.`)
+      lines.push(`User feedback: ${feedback ?? ''}`)
+      lines.push(
+        'Action required: modify the workflow script according to the user\'s feedback and validate/run it again.',
+      )
+      return lines.join('\n')
+    }
+    const detail = reason ? `${decision}: ${reason}` : decision
+    lines.push(`ZCode workflow "${label}"${suffix} was NOT executed — user declined execution (${detail ?? 'rejected'}).`)
+    lines.push('Action required: do not retry automatically; wait for the user\'s next instruction.')
     return lines.join('\n')
   }
 
@@ -1379,6 +1710,7 @@ function messageOf(error) {
 
 export {
   resolveArgs, splitFrontmatter, parseFrontmatterYaml, normalizeFrontmatter, compile, renderEnvelope,
+  CONFIRM_OPTIONS,
   // Exported for the route tests: the cancel/read/list handlers are pure
   // functions of (store, activeRuns), so they can be exercised without a Host.
   registerRunRoutes,

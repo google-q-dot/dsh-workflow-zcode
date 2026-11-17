@@ -264,3 +264,89 @@ test('trace projection: work before the first phase gets an 未分阶段 station
     journal.close()
   }
 })
+
+
+test('trace projection: unobserved anonymous phase placeholders do not render', async () => {
+  const journal = openJournal()
+  try {
+    journal.createRun({
+      id: 'r-blank', parentSessionId: 's', cwd: '/w', name: 'blank',
+      // Six dynamic `phase(expr)` call sites: only one ran.
+      plan: { phases: [null, null, null, '固定阶段', null, null] },
+    })
+    journal.putNode({
+      runId: 'r-blank', siteId: 'ask#1', ordinal: 1, kind: 'ask', inputHash: 'h',
+      status: 'completed', result: {}, stats: { phase: '动态阶段 A' },
+    })
+    journal.appendEvent('r-blank', 'phase-entered', { title: '动态阶段 A' })
+    journal.markRunning('r-blank')
+
+    const trace = await createTraceStore(journal).readRun('r-blank')
+    assert.deepEqual(trace.phases.map((phase) => phase.title), ['动态阶段 A', '固定阶段'])
+    assert.equal(trace.phases.some((phase) => phase.title === '(未命名阶段)'), false)
+    assert.equal(trace.phases[1].status, 'pending')
+    assert.equal(trace.phases[1].planned, true)
+  } finally {
+    journal.close()
+  }
+})
+
+test('trace projection: no dynamic phase called yields no blank stations', async () => {
+  const journal = openJournal()
+  try {
+    journal.createRun({ id: 'r-empty', parentSessionId: 's', cwd: '/w', name: 'empty', plan: { phases: [null, null, null] } })
+    journal.markRunning('r-empty')
+    const trace = await createTraceStore(journal).readRun('r-empty')
+    assert.deepEqual(trace.phases, [])
+  } finally {
+    journal.close()
+  }
+})
+
+test('trace projection: a live run reports running, live duration and completed earlier phases', async () => {
+  const journal = openJournal()
+  try {
+    journal.createRun({ id: 'r-live', parentSessionId: 's', cwd: '/w', name: 'live', plan: { phases: ['前半', '当前'] } })
+    journal.putNode({
+      runId: 'r-live', siteId: 'ask#1', ordinal: 1, kind: 'ask', actorSiteId: 'actor#1',
+      inputHash: 'h1', status: 'completed', result: {}, stats: { phase: '前半' },
+    })
+    journal.putNode({
+      runId: 'r-live', siteId: 'ask#2', ordinal: 1, kind: 'ask', actorSiteId: 'actor#1',
+      inputHash: 'h2', status: 'running', stats: { phase: '当前' },
+    })
+    journal.appendEvent('r-live', 'phase-entered', { title: '前半' })
+    journal.appendEvent('r-live', 'phase-entered', { title: '当前' })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    journal.markRunning('r-live')
+
+    const store = createTraceStore(journal)
+    const trace = await store.readRun('r-live')
+    assert.equal(trace.status, 'running')
+    assert.ok(trace.durationMs > 0, `live duration must be positive, got ${trace.durationMs}`)
+    assert.deepEqual(trace.phases.map((phase) => phase.status), ['completed', 'running'])
+
+    const listed = await store.listRuns({})
+    assert.ok(listed.runs[0].durationMs > 0)
+  } finally {
+    journal.close()
+  }
+})
+
+test('journal: markRunning only moves a live row and refreshes time_updated', () => {
+  const journal = openJournal()
+  try {
+    journal.createRun({ id: 'r-status', parentSessionId: 's', cwd: '/w', name: 'status' })
+    assert.equal(journal.getRun('r-status').status, 'pending')
+    const before = journal.getRun('r-status').timeUpdated
+    const marked = journal.markRunning('r-status')
+    assert.equal(marked.status, 'running')
+    assert.ok(marked.timeUpdated >= before)
+
+    journal.settleRun('r-status', { status: 'completed', result: { value: 1 } })
+    journal.markRunning('r-status')
+    assert.equal(journal.getRun('r-status').status, 'completed', 'a settled row is never reopened')
+  } finally {
+    journal.close()
+  }
+})

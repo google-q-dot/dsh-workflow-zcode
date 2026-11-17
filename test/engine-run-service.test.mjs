@@ -18,6 +18,7 @@ import { createArtifactPublisher } from '../src/engine/artifacts.mjs'
 import { createWorld } from '../src/engine/world.mjs'
 import { createActorPool } from '../src/engine/actor-pool.mjs'
 import { executeRun, worldOperation } from '../src/engine/run-service.mjs'
+import { createTraceStore } from '../src/engine/trace-projection.mjs'
 
 /**
  * A child that speaks the same NDJSON protocol as `child-entry.mjs`, but whose
@@ -713,6 +714,63 @@ test('run service: reply swallows synchronous send errors before exit settles', 
     const outcome = await runPromise
     assert.equal(outcome.status, RUN_STATUS.failed)
   } finally {
+    await kit.cleanup()
+  }
+})
+
+
+test('run service: a live run is running and its actor is visible before the ask returns', async () => {
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const kit = await fixture({
+    script: async ({ event, request, complete }) => {
+      event({ type: 'phase', title: '审阅' })
+      event({ type: 'actor', siteId: 'actor#1', name: '审阅人', persona: { system: '严格' } })
+      const value = await request({ type: 'ask', siteId: 'ask#1', actorSiteId: 'actor#1', instructions: '审阅' })
+      complete({ ok: true, value })
+    },
+    responder: async () => {
+      await gate
+      return 'ok'
+    },
+  })
+  const running = executeRun({
+    journal: kit.journal,
+    runId: 'run-1',
+    script: 'ignored',
+    args: {},
+    cwd: kit.root,
+    child: kit.child,
+    actors: kit.actors,
+    world: kit.world,
+    artifacts: kit.artifacts,
+  })
+  try {
+    const deadline = Date.now() + 3000
+    while (Date.now() < deadline) {
+      const run = kit.journal.getRun('run-1')
+      if (run?.status === 'running' && kit.journal.listActors('run-1').length > 0) break
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    // Give the clock a moment so a live duration must be non-zero.
+    await new Promise((resolve) => setTimeout(resolve, 15))
+
+    assert.equal(kit.journal.getRun('run-1').status, RUN_STATUS.running)
+    const actor = kit.journal.listActors('run-1')[0]
+    assert.equal(actor.siteId, 'actor#1')
+    assert.equal(actor.name, '审阅人')
+    assert.match(actor.sessionId ?? '', /^sess_dwf-/)
+
+    const trace = await createTraceStore(kit.journal).readRun('run-1')
+    assert.equal(trace.status, 'running')
+    assert.ok(trace.durationMs > 0)
+    assert.equal(trace.actors.length, 1)
+    assert.equal(trace.actors[0].name, '审阅人')
+    assert.equal(trace.actors[0].sessionId, actor.sessionId)
+    assert.equal(trace.phases[0].status, 'running')
+  } finally {
+    release()
+    await running.catch(() => {})
     await kit.cleanup()
   }
 })

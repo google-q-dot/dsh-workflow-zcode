@@ -53,6 +53,8 @@ window.__ModuleLoader__.load({
       'panel.delete': '删除记录',
       'panel.apply': '应用',
       'panel.cancel': '取消',
+      'panel.autoApprove': '自动执行已开启',
+      'panel.autoApproveRevoke': '点击关闭本会话工作流自动执行，恢复运行前确认',
       'panel.configTitle': '运行配置',
       'panel.model': '子代理模型',
       'panel.modelSession': '跟随会话模型',
@@ -1815,6 +1817,20 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState(undefined)
       const [busy, setBusy] = useState(false)
       const [configOpen, setConfigOpen] = useState(false)
+      const [sessionAutoApprove, setSessionAutoApprove] = useState(false)
+
+      const loadSessionPolicy = useCallback(async () => {
+        if (scope !== 'session' || sessionId === undefined) {
+          setSessionAutoApprove(false)
+          return
+        }
+        try {
+          const value = await callRoute('session-policy', { sessionId })
+          setSessionAutoApprove(value?.autoApprove === true)
+        } catch {
+          // Optional route: older hosts or minimal route stubs stay quiet.
+        }
+      }, [scope, sessionId])
 
       const loadRuns = useCallback(async (silent = false) => {
         if (silent !== true) setLoading(true)
@@ -1827,12 +1843,13 @@ window.__ModuleLoader__.load({
             if (current !== undefined && list.some((run) => run.runId === current)) return current
             return list[0]?.runId
           })
+          void loadSessionPolicy()
         } catch (failure) {
           setError(failure instanceof Error ? failure.message : String(failure))
         } finally {
           if (silent !== true) setLoading(false)
         }
-      }, [scope, sessionId, cwd])
+      }, [scope, sessionId, cwd, loadSessionPolicy])
 
       const loadTrace = useCallback(async (runId, silent = false) => {
         if (runId === undefined) return
@@ -1946,6 +1963,19 @@ window.__ModuleLoader__.load({
         }
       }, [loadRuns])
 
+      const revokeSessionAutoApprove = useCallback(async () => {
+        if (sessionId === undefined) return
+        setBusy(true)
+        try {
+          const value = await callRoute('session-policy', { sessionId, autoApprove: false })
+          setSessionAutoApprove(value?.autoApprove === true)
+        } catch (failure) {
+          setError(failure instanceof Error ? failure.message : String(failure))
+        } finally {
+          setBusy(false)
+        }
+      }, [sessionId])
+
       useEffect(() => {
         ensureStyles()
       }, [])
@@ -1959,6 +1989,24 @@ window.__ModuleLoader__.load({
           sessionAvailable: sessionId !== undefined,
         }),
         h('span', { key: 'sp', style: { flex: 1 } }),
+        scope === 'session' && sessionAutoApprove
+          ? h('button', {
+            key: 'auto-approve',
+            type: 'button',
+            className: 'dsh-wf-pill',
+            style: {
+              ...S.pill,
+              border: 'none',
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+              color: T.amberText,
+            },
+            onClick: revokeSessionAutoApprove,
+            disabled: busy,
+            title: zh['panel.autoApproveRevoke'],
+            'data-testid': 'session-auto-approve-pill',
+          }, `${zh['panel.autoApprove']} ×`)
+          : null,
         h('button', {
           key: 'refresh', type: 'button', className: 'dsh-wf-ghost',
           style: { ...S.ghostButton, padding: '4px 6px' },

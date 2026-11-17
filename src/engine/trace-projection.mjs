@@ -126,6 +126,7 @@ export function createTraceStore(journal) {
         && observedTitles.includes(entry.title)) entry.observed = true
     }
 
+
     // A node can carry a phase the plan never declared (older runs stored no
     // plan); keep it visible rather than dropping the work.
     for (const node of nodes) {
@@ -150,11 +151,18 @@ export function createTraceStore(journal) {
       })
     }
 
+    // A dynamic `phase(expr)` compiles to an anonymous placeholder. Only the
+    // ones the run ACTUALLY reached became stations; the remaining placeholders
+    // (conditional branches, retry paths, later phases of a long run) must not
+    // render as a row of `(未命名阶段)`. Static named phases stay as pending
+    // stations even when unobserved.
+    const visibleEntries = entries.filter((entry) => !(entry.title === null && entry.observed === false))
+
     const actorBySite = new Map(actors.map((actor) => [actor.siteId, actor]))
-    const lastObservedIndex = entries.reduce((last, entry, index) => (entry.observed ? index : last), -1)
+    const lastObservedIndex = visibleEntries.reduce((last, entry, index) => (entry.observed ? index : last), -1)
     const runRunning = run.status === 'running' || run.status === 'pending'
 
-    return entries.map((entry, index) => {
+    return visibleEntries.map((entry, index) => {
       const phaseNodes = entry.unphased === true
         ? nodes.filter((node) => node.phase === null || node.phase === undefined)
         : nodes.filter((node) => node.phase === entry.title)
@@ -165,7 +173,6 @@ export function createTraceStore(journal) {
       let status
       if (failed > 0) status = 'failed'
       else if (running > 0) status = 'running'
-      else if (run.status === 'pending') status = 'pending'
       else if (entry.observed === false) status = 'pending'
       else if (runRunning && index === lastObservedIndex) status = 'running'
       else status = 'completed'
@@ -236,7 +243,9 @@ export function createTraceStore(journal) {
           description: run.plan?.description ?? null,
           startedAt: run.timeCreated,
           updatedAt: run.timeUpdated,
-          durationMs: Math.max(0, run.timeUpdated - run.timeCreated),
+          durationMs: (run.status === 'running' || run.status === 'pending')
+            ? Math.max(0, Date.now() - run.timeCreated)
+            : Math.max(0, run.timeUpdated - run.timeCreated),
           phases: journal.listEvents(run.id).filter((event) => event.type === 'phase-entered').length,
           nodes: asks.length,
           worldSteps: nodes.filter((node) => WORLD_KINDS.has(node.kind)).length,
@@ -345,7 +354,9 @@ export function createTraceStore(journal) {
         configEvents,
         startedAt: run.timeCreated,
         finishedAt: run.timeUpdated,
-        durationMs: Math.max(0, run.timeUpdated - run.timeCreated),
+        durationMs: (run.status === 'running' || run.status === 'pending')
+          ? Math.max(0, Date.now() - run.timeCreated)
+          : Math.max(0, run.timeUpdated - run.timeCreated),
         maxConcurrency: run.capsMaxConcurrency ?? 0,
         resumedFrom: run.resumedFrom ?? null,
         resumeCount: run.resumeCount ?? 0,

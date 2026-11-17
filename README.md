@@ -15,6 +15,7 @@ A DeepSeek Harness (DSH) plugin that runs **ZCode `.dwf.ts` dynamic workflows**:
 - **Sandboxed execution.** The workflow body runs in a separate child process with a `node:vm` scope. Workspace helpers (`world.run`, `files.*`, `git.*`) are read-oriented and go through the host's subprocess/sandbox services; the plugin does not spawn a shell on its own.
 - **Durable journal.** Runs, actors, nodes, artifacts and events are stored in SQLite at `~/.dsh/zcode-workflow/runs.db` (configurable). A failed or cancelled run can be resumed: completed nodes replay from the journal without another model call, and recorded subagent sessions are reattached.
 - **Real concurrency control.** `maxConcurrency` caps simultaneous subagent turns (default 13); `maxTotalAgents` caps the lifetime number of subagents (default 200). Both are per run and can be changed from the panel.
+- **Pre-execution confirmation gate.** When `confirmExecution` is `'ask'` (default) and the Host exposes `userQuestions`, compiling/resuming a workflow previews phases, actors, commands and source before asking to: allow once, allow all workflows in the current session, decline, or submit revision feedback (persisted per session in SQLite and revocable from the sidebar panel).
 - **Optional subagent model.** `subagentModel` follows the calling session by default, or pins a `provider/model`.
 
 ### Tools
@@ -58,6 +59,7 @@ runToolName: run_zcode_workflow
 listToolName: list_zcode_workflows
 resumeToolName: resume_zcode_workflow
 typeCheck: true
+confirmExecution: 'ask'   # 'ask' | 'never'
 maxTotalAgents: 200
 maxConcurrency: 13
 subagentModel: ''          # '' or 'session' follows the calling session
@@ -96,6 +98,7 @@ MIT © qiaozhao
 - **沙箱执行**：工作流正文在独立子进程 + `node:vm` 作用域中运行；`world.run`、`files.*`、`git.*` 等只读/受限能力通过宿主的 subprocess 与 sandbox 服务执行，插件自身不另起 shell。
 - **持久运行日志**：run、actor、node、artifact 与事件写入 SQLite（默认 `~/.dsh/zcode-workflow/runs.db`，可配置）。失败或取消的运行可以续跑：已完成的节点直接从日志回放、不再调用模型，记录过的子代理会话会被重新接上。
 - **真实并发控制**：`maxConcurrency` 限制同时进行的子代理轮次（默认 13）；`maxTotalAgents` 限制整个 run 创建的代理总数（默认 200）。两者都是 per-run 设置，并可在面板中修改。
+- **执行前确认门禁**：默认 `confirmExecution: 'ask'` 且宿主提供 `userQuestions` 服务时，编译/续跑前会先展示阶段、子代理、命令、参数与源码预览，供用户选择「允许这一次」「允许本 Session 自动执行」「拒绝执行」或「填写修改意见退回重写」（会话级自动执行持久化于 SQLite，并可在右侧栏面板一键关闭）。
 - **可选子代理模型**：默认跟随发起会话的模型，也可以固定为某个 `provider/model`。
 
 ### 工具
@@ -139,6 +142,7 @@ runToolName: run_zcode_workflow
 listToolName: list_zcode_workflows
 resumeToolName: resume_zcode_workflow
 typeCheck: true
+confirmExecution: 'ask'   # 'ask' | 'never'
 maxTotalAgents: 200
 maxConcurrency: 13
 subagentModel: ''          # '' 或 'session' 表示跟随调用会话

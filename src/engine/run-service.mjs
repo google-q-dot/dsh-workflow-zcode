@@ -122,6 +122,13 @@ export async function executeRun({
   resumedFrom,
 }) {
   const startedAt = Date.now()
+  // The row was inserted as `pending` before the sandbox started; from here on
+  // it is a live run, and the panel must not keep showing "queued".
+  try {
+    journal.markRunning?.(runId)
+  } catch {
+    // an unwritable status must not prevent the script from running
+  }
   /** siteId → next ordinal, per site. Ask/report/world sites each count alone. */
   const ordinals = new Map()
   /** actor siteId → next ordinal. An actor's identity is its own counter. */
@@ -195,6 +202,17 @@ export async function executeRun({
       }
     }
   }
+
+  // Persist a child the moment the pool creates/resumes it. `ask()` can take
+  // minutes, and waiting for it left the panel showing `actor#5` with no way to
+  // open the subagent session for that whole time.
+  const unsubscribeActorSync = typeof actors.subscribe === 'function'
+    ? actors.subscribe((event) => {
+      if (event.type === 'actor-created' || event.type === 'actor-resumed' || event.type === 'actor-rehydrated') {
+        syncActors()
+      }
+    })
+    : undefined
 
   /** How many settled nodes this attempt replayed instead of executing. */
   let cachedNodes = 0
@@ -575,6 +593,9 @@ export async function executeRun({
       // pool (`journalEventSink`), which knows the session id — recording it here
       // too produced two `actor-created` rows for one actor.
       runtimeActors.set(message.siteId, { name: message.name ?? null, persona: message.persona ?? null })
+      // The actor may already exist in the pool (a helper created it earlier);
+      // refresh its row now so the declared name lands before the ask resolves.
+      syncActors()
       emit({ type: 'actor', siteId: message.siteId, name: message.name })
     }
   }
@@ -711,6 +732,7 @@ export async function executeRun({
   // that used several.
   const agentsStarted = actors.list().length
   syncActors()
+  unsubscribeActorSync?.()
   try {
     await actors.dispose()
   } catch {

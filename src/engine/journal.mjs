@@ -167,6 +167,12 @@ CREATE TABLE IF NOT EXISTS dwf_event (
   unique(run_id, sequence)
 );
 CREATE INDEX IF NOT EXISTS dwf_event_run ON dwf_event(run_id, sequence);
+
+CREATE TABLE IF NOT EXISTS dwf_session_policy (
+  session_id text primary key,
+  auto_approve integer not null default 0,
+  time_updated integer not null
+);
 `
 
 const now = () => Date.now()
@@ -288,6 +294,13 @@ export function openJournal({ file = ':memory:' } = {}) {
     listEvents: db.prepare(
       'SELECT * FROM dwf_event WHERE run_id = ? AND sequence >= ? ORDER BY sequence LIMIT ?',
     ),
+    selectSessionPolicy: db.prepare(
+      'SELECT auto_approve FROM dwf_session_policy WHERE session_id = ?',
+    ),
+    upsertSessionPolicy: db.prepare(`INSERT INTO dwf_session_policy
+      (session_id, auto_approve, time_updated) VALUES (?,?,?)
+      ON CONFLICT(session_id) DO UPDATE SET
+        auto_approve = excluded.auto_approve, time_updated = excluded.time_updated`),
   }
 
   const mapRun = (row) => (row === undefined ? undefined : {
@@ -385,6 +398,21 @@ export function openJournal({ file = ':memory:' } = {}) {
           : statements.listRunsByCwd.all(cwd, bounded))
         : statements.listRunsBySession.all(parentSessionId, bounded)
       return rows.map(mapRun)
+    },
+
+    /**
+     * Mark a new attempt as actually executing.
+     *
+     * `createRun` inserts `pending` (the row exists before the sandbox starts),
+     * and nothing else used to move it: a live run stayed "queued" forever in
+     * the panel even while nodes and phases were being written. A settled row
+     * is never reopened here; only pending/running rows transition.
+     */
+    markRunning(id) {
+      db.prepare(`UPDATE dwf_run SET status = ?, time_updated = ?
+        WHERE id = ? AND status IN (?, ?)`)
+        .run(RUN_STATUS.running, now(), id, RUN_STATUS.pending, RUN_STATUS.running)
+      return this.getRun(id)
     },
 
     /**
@@ -542,6 +570,22 @@ export function openJournal({ file = ':memory:' } = {}) {
       }))
     },
 
+    /** Whether automatic workflow execution was approved for a session. */
+    isSessionAutoApproved(sessionId) {
+      if (typeof sessionId !== 'string' || sessionId.trim() === '') return false
+      const row = statements.selectSessionPolicy.get(sessionId.trim())
+      return Number(row?.auto_approve ?? 0) === 1
+    },
+
+    /** Record or revoke session-wide automatic workflow execution approval. */
+    setSessionAutoApprove(sessionId, enabled) {
+      if (typeof sessionId !== 'string' || sessionId.trim() === '') return false
+      const normalized = sessionId.trim()
+      const approved = enabled ? 1 : 0
+      statements.upsertSessionPolicy.run(normalized, approved, now())
+      return approved === 1
+    },
+
     close() {
       if (closed) return
       closed = true
@@ -569,6 +613,7 @@ export function openJournal({ file = ':memory:' } = {}) {
       return (...args) => {
         if (closed) {
           if (property === 'reconcileInterruptedRuns') return { runs: 0, nodes: 0 }
+          if (property === 'isSessionAutoApproved') return false
           return LIST_METHODS.has(property) ? [] : undefined
         }
         return value.apply(target, args)

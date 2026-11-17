@@ -226,11 +226,20 @@ export function createActorPool({
     }
   }
 
+  /** Extra observers (the journal sync) subscribe to the same pool events. */
+  const listeners = new Set()
   const notify = (event) => {
     try {
       onEvent(event)
     } catch {
       // a broken observer must not fail the run
+    }
+    for (const listener of [...listeners]) {
+      try {
+        listener(event)
+      } catch {
+        // one observer must not break the others
+      }
     }
   }
 
@@ -423,6 +432,15 @@ export function createActorPool({
       // A rejected ask must not poison the queue for the next one.
       queues.set(ref, queued.catch(() => {}))
       return queued
+    },
+
+    /**
+     * Observe creation/resume events. The run service uses this to persist the
+     * actor row as soon as the child exists, instead of after a long ask ends.
+     */
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
     },
 
     /** Live scheduler counters (used by tests and the run summary). */
