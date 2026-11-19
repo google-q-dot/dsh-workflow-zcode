@@ -174,6 +174,50 @@ test('the persona becomes a prompt section with text and no interpolation', asyn
   kit.runtime.close()
 })
 
+test('child-facing tools declare complete object-rooted parameter schemas', async () => {
+  const kit = fixture()
+  await kit.runtime.createActor({ sessionId: 'sess-schema', name: '模式' })
+  const names = ['structured_output', 'submit_result', 'LocalToolSearch']
+  const definitions = names.map((name) => {
+    const definition = kit.tools.find((tool) => tool.name === name)
+    assert.ok(definition !== undefined, `${name} must be registered for the child`)
+    return definition
+  })
+  const allowed = new Set(['type', 'properties', 'required', 'items', 'enum', 'const', 'oneOf', 'additionalProperties', 'description', 'title', 'default', 'examples'])
+  const walk = (node, path) => {
+    if (node === null || typeof node !== 'object') return
+    for (const [key, value] of Object.entries(node)) {
+      assert.equal(allowed.has(key), true, `unsupported keyword ${key} at ${path}`)
+      if (key === 'required') {
+        assert.equal(Array.isArray(value), true, `required must be an array at ${path}`)
+        for (const required of value) assert.equal(typeof required, 'string')
+      } else if (key === 'properties') {
+        for (const [name, sub] of Object.entries(value)) walk(sub, `${path}.properties.${name}`)
+      } else if (key === 'items') {
+        walk(value, `${path}.items`)
+      } else if (key === 'oneOf') {
+        value.forEach((sub, index) => walk(sub, `${path}.oneOf[${index}]`))
+      } else if (typeof value === 'object') {
+        walk(value, `${path}.${key}`)
+      }
+    }
+  }
+  for (const definition of definitions) {
+    assert.equal(definition.parameters?.type, 'object', `${definition.name} needs an object root`)
+    assert.equal(typeof definition.parameters?.properties, 'object')
+    assert.equal(Array.isArray(definition.parameters?.properties), false)
+    walk(definition.parameters, `${definition.name}.parameters`)
+  }
+  for (const name of ['structured_output', 'submit_result']) {
+    const definition = definitions.find((tool) => tool.name === name)
+    assert.deepEqual(definition.parameters.required, ['json'])
+    assert.deepEqual(Object.keys(definition.parameters.properties), ['json'])
+  }
+  const search = definitions.find((tool) => tool.name === 'LocalToolSearch')
+  assert.equal(search.parameters.required, undefined)
+  kit.runtime.close()
+})
+
 test('the captured result is validated against the current schema', async () => {
   const kit = fixture()
   const handle = await kit.runtime.createActor({ sessionId: 'sess-5', name: '丁' })

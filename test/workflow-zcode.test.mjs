@@ -181,10 +181,17 @@ test('tool schemas are object-rooted with declared properties', async () => {
   assert.equal(ctx.registered.length, 3)
 
   for (const definition of ctx.registered) {
-    // `parameters` is the flat property map the registry wraps into an object
-    // root; adding `type: 'object'` here would register a property with that name.
-    assert.equal(typeof definition.parameters, 'object')
-    assert.equal(definition.parameters.type, undefined, `${definition.name} must not declare its own root type`)
+    // `ctx.tools.register()` stores `parameters` verbatim. Unlike `defineTool()`
+    // it does NOT wrap a bare property map, so every tool must ship the complete
+    // object-rooted schema that the model gateway receives.
+    assert.equal(definition.parameters?.type, 'object', `${definition.name} needs an object root`)
+    assert.equal(Array.isArray(definition.parameters?.required), definition.parameters?.required !== undefined)
+    if (definition.parameters.required !== undefined) {
+      assert.ok(definition.parameters.required.length > 0, `${definition.name} must not declare an empty required`)
+      for (const key of definition.parameters.required) {
+        assert.equal(Object.hasOwn(definition.parameters.properties, key), true, `${definition.name} requires unknown ${key}`)
+      }
+    }
     assert.equal(typeof definition.output.schema, 'object')
     assert.equal(definition.output.schema.type, 'object')
     assert.equal(typeof definition.execute, 'function')
@@ -193,15 +200,49 @@ test('tool schemas are object-rooted with declared properties', async () => {
 
   const resume = ctx.registered.find((definition) => definition.name === 'resume_zcode_workflow')
   assert.deepEqual(
-    Object.keys(resume.parameters).sort(),
+    Object.keys(resume.parameters.properties).sort(),
     ['allow_rehydrate', 'max_concurrency', 'run_id', 'subagent_model'],
   )
+  assert.deepEqual(resume.parameters.required, ['run_id'])
 
   const run = ctx.registered.find((definition) => definition.name === 'run_zcode_workflow')
   assert.deepEqual(
-    Object.keys(run.parameters).sort(),
+    Object.keys(run.parameters.properties).sort(),
     ['args', 'dry_run', 'max_concurrency', 'max_total_agents', 'name', 'path', 'script', 'subagent_model'],
   )
+  // script/path are an either-or pair enforced by execute(), not JSON Schema.
+  assert.equal(run.parameters.required, undefined)
+})
+
+test('tool schemas equal what the DSH implicit property-map compiler produces', async () => {
+  const { apply } = await import('../index.mjs')
+  const ctx = stubContext()
+  apply(ctx, { journalFile: ':memory:' })
+
+  // dsh-tools' `parameterSchemaSpecToJsonSchema()` compiles a per-property map
+  // into `{ type: 'object', properties, required? }`. Bare register() does not
+  // call it, so the shipped schema must be that compiled shape exactly.
+  const compile = (definition) => {
+    const spec = structuredClone(definition.parameters.properties)
+    const required = definition.parameters.required
+    if (required !== undefined) {
+      for (const key of required) spec[key] = { ...spec[key], required: true }
+    }
+    return {
+      type: 'object',
+      properties: Object.fromEntries(Object.entries(spec).map(([key, schema]) => {
+        if (schema.required !== true) return [key, schema]
+        const { required: _required, ...rest } = schema
+        return [key, rest]
+      })),
+    }
+  }
+  for (const definition of ctx.registered) {
+    const expected = compile(definition)
+    const required = definition.parameters.required
+    if (required !== undefined) expected.required = required
+    assert.deepEqual(definition.parameters, expected, `${definition.name} diverges from the DSH compiler`)
+  }
 })
 
 test('the tool schema keywords stay inside the supported subset', async () => {
@@ -213,18 +254,22 @@ test('the tool schema keywords stay inside the supported subset', async () => {
     if (node === null || typeof node !== 'object') return
     for (const [key, value] of Object.entries(node)) {
       assert.equal(allowed.has(key), true, `unsupported keyword ${key} at ${path}`)
-      if (key === 'properties' && value !== null && typeof value === 'object') {
+      if (key === 'required') {
+        assert.equal(Array.isArray(value), true, `required must be an array at ${path}`)
+        for (const name of value) assert.equal(typeof name, 'string', `required entries must be strings at ${path}`)
+      } else if (key === 'properties') {
         for (const [name, sub] of Object.entries(value)) walk(sub, `${path}.properties.${name}`)
+      } else if (key === 'items') {
+        walk(value, `${path}.items`)
+      } else if (key === 'oneOf') {
+        value.forEach((sub, index) => walk(sub, `${path}.oneOf[${index}]`))
       } else if (typeof value === 'object') {
         walk(value, `${path}.${key}`)
       }
     }
   }
   for (const definition of ctx.registered) {
-    // `parameters` is a PROPERTY MAP: its keys are names, not keywords.
-    for (const [name, schema] of Object.entries(definition.parameters)) {
-      walk(schema, `${definition.name}.parameters.${name}`)
-    }
+    walk(definition.parameters, `${definition.name}.parameters`)
     walk(definition.output.schema, `${definition.name}.output`)
   }
 })

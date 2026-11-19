@@ -209,6 +209,15 @@ export function usageTokensOf(message) {
   return Number.isFinite(sum) && sum > 0 ? sum : 0
 }
 
+/** Build the complete JSON Schema root `tools.register()` expects. */
+function parametersSchema(properties, required = []) {
+  return {
+    type: 'object',
+    properties,
+    ...(required.length === 0 ? {} : { required }),
+  }
+}
+
 /**
  * Drive persistent child agents through the Host's Agent service.
  *
@@ -249,12 +258,12 @@ export function createAgentRuntime({ ctx, agents, subagents, parentAgent, cwd, a
         + 'Call this with a JSON object that satisfies the schema in the task. '
         + 'It is the only accepted way to return a typed result.'
         + (toolName === 'submit_result' ? ' (ZCode-compatible alias of structured_output.)' : ''),
-      parameters: {
+      parameters: parametersSchema({
         json: {
           type: 'string',
           description: 'The JSON object, serialised, satisfying the schema given in the task.',
         },
-      },
+      }, ['json']),
       output: {
         schema: { type: 'object', additionalProperties: true },
         render: () => [{ type: 'text', text: 'structured result accepted' }],
@@ -344,13 +353,13 @@ export function createAgentRuntime({ ctx, agents, subagents, parentAgent, cwd, a
     description:
       'Search the tools already available in this session by name or description. '
       + 'The matches are immediately callable; this tool only lists them.',
-    parameters: {
+    parameters: parametersSchema({
       query: {
         type: 'string',
         description: 'Keywords to match against tool names/descriptions. Supports "select:" prefixes and comma/顿号 separated terms.',
       },
       max_results: { type: 'number', description: 'Maximum matches to return (default 10, max 50).' },
-    },
+    }),
     output: {
       schema: { type: 'object', additionalProperties: true },
       render(_args, value) {

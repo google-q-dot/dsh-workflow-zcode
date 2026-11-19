@@ -1,6 +1,6 @@
 {
   "name": "dsh-workflow-zcode",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "type": "module",
   "description": "A DeepSeek Harness plugin that runs ZCode .dwf.ts dynamic workflows with sandboxed execution, persistent subagents, a resumable SQLite journal, and a ZCode-style sidebar panel.",
   "exports": {

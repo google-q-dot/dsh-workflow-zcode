@@ -71,6 +71,15 @@ const DEFAULTS = {
   snapshotDir: '',
 }
 
+/** Build the complete JSON Schema root `tools.register()` expects. */
+function toolParameters(properties, required = []) {
+  return {
+    type: 'object',
+    properties,
+    ...(required.length === 0 ? {} : { required }),
+  }
+}
+
 const DESCRIPTION = `Run a ZCode dynamic workflow: a TypeScript orchestration script that fans work out across subagents.
 
 ZCode authoring surface:
@@ -205,7 +214,7 @@ function defineRunTool(ctx, settings, journal, tracking) {
   return {
     name: settings.runToolName,
     description: DESCRIPTION,
-    parameters: {
+    parameters: toolParameters({
       script: {
         type: 'string',
         description: 'The workflow body as TypeScript, without a front-matter block. Provide this or `path`.',
@@ -239,7 +248,7 @@ function defineRunTool(ctx, settings, journal, tracking) {
         type: 'boolean',
         description: 'Compile and report diagnostics, phases and the subagent/command inventory without running anything.',
       },
-    },
+    }),
     output: {
       schema: { type: 'object', additionalProperties: true },
       render(_args, value) {
@@ -261,7 +270,7 @@ function defineResumeTool(ctx, settings, journal, tracking) {
       'Resume a ZCode workflow run that failed or was cancelled, reusing everything it already completed. '
       + 'Nodes whose recorded input still matches are replayed from the journal at zero token cost; '
       + 'subagent sessions are reattached, not recreated. Refuses a run whose script no longer compiles to the recorded hash.',
-    parameters: {
+    parameters: toolParameters({
       run_id: {
         type: 'string',
         description: 'The run id returned by a previous run_zcode_workflow call.',
@@ -280,7 +289,7 @@ function defineResumeTool(ctx, settings, journal, tracking) {
         type: 'string',
         description: 'Optional subagent model override for the resumed attempt ("provider/model" or "session").',
       },
-    },
+    }, ['run_id']),
     output: {
       schema: { type: 'object', additionalProperties: true },
       render(_args, value) {
@@ -579,9 +588,9 @@ function defineListTool(ctx, settings) {
     description:
       'List saved ZCode workflows (`.dwf.ts`) visible from this Session: the working-directory `.zcode/workflows` '
       + 'directory and the global ZCode workflow directory. Returns each workflow\'s name, description, whenToUse and declared arguments.',
-    parameters: {
+    parameters: toolParameters({
       query: { type: 'string', description: 'Optional case-insensitive filter over the name and description.' },
-    },
+    }),
     output: {
       schema: { type: 'object', additionalProperties: true },
       render(_args, value) {
