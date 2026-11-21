@@ -26,6 +26,23 @@ A DeepSeek Harness (DSH) plugin that runs **ZCode `.dwf.ts` dynamic workflows**:
 | `list_zcode_workflows` | List `.dwf.ts` files visible from the session (project `.zcode/workflows` and the global ZCode workflow directory), with their declared arguments. |
 | `resume_zcode_workflow` | Resume a failed or cancelled run, reusing completed nodes and recorded subagent sessions. |
 
+### Service contract (for other plugins)
+
+The plugin registers a Cordis service named **`zcodeWorkflow`** (`version` 0.2.3). It is an optional capability, not a dependency for the plugin itself: the sidebar, journal and tools work without any consumer. Other plugins (notably `dsh-mcp-bridge`) discover it with `ctx.get('zcodeWorkflow')` and never import this package.
+
+| Method | Purpose |
+| --- | --- |
+| `listRuns({ sessionId?, cwd?, status?, limit? })` | Compact run rows (status, phase, node counts, spent tokens), scoped when a session or cwd is given. |
+| `getRun({ runId, sessionId, includeScript?, includeTrace?, maxNodes?, maxEvents? })` | One run's phase, bounded nodes, actors (with subagent `sessionId`), artifact metadata, error. Script/trace are opt-in. |
+| `progress({ sessionId, limit? })` | Compact active runs for `dsh_wait_session` / `dsh_get_session` summaries. |
+| `cancelRun({ runId, sessionId })` | Abort exactly one live run; the parent session is untouched. |
+| `resumeRun({ runId, sessionId, allowRehydrate?, maxConcurrency?, subagentModel? })` | Resume a failed/cancelled run (reuses journal nodes and actor sessions). |
+| `configureRun({ runId, sessionId, maxConcurrency?, subagentModel? })` | Update plan/caps only. **Never starts a run.** Completed runs are immutable. |
+| `deleteRun({ runId, sessionId })` | Remove one settled run and its journal rows. |
+| `getSessionPolicy({ sessionId })` / `setSessionPolicy({ sessionId, autoApprove })` | Read/write the workflow auto-execution policy. |
+
+All control methods require the owning `sessionId`; a run whose `parentSessionId` differs answers `WORKFLOW_FORBIDDEN`. Failures carry a stable `WORKFLOW_*` code. The service is unregistered automatically when the plugin fiber unloads.
+
 ### Sidebar panel
 
 The plugin registers a right-column **Workflow** tab and a sidebar entry. The panel shows the live run trace: phases and nodes, subagent roster, token usage, artifacts, and run lineage. It supports:
@@ -41,6 +58,7 @@ The plugin registers a right-column **Workflow** tab and a sidebar entry. The pa
 - **Node.js >= 22** (`node:sqlite` is used for the journal).
 - DeepSeek Harness **>= 0.2.1-rc.2 < 0.3.0**.
 - The host must expose the DSH services the plugin uses: `subprocess`, `agents`, `sandbox`/`sandboxPolicy`, `sessions`, `workingDirectory`, `connection` (for the panel routes) and `slots` (client side).
+- No other plugin is required. `zcodeWorkflow` is provided for consumers; `@local/dsh-mcp-bridge` may consume it when both are installed.
 
 ### Install
 
@@ -108,6 +126,10 @@ MIT © qiaozhao
 | `run_zcode_workflow` | 用内联 `script` 或已保存的 `path` 运行工作流；支持 `args`、`name`、`max_total_agents`、`max_concurrency`、`subagent_model` 与 `dry_run`。 |
 | `list_zcode_workflows` | 列出当前会话可见的 `.dwf.ts`（项目 `.zcode/workflows` 与全局 ZCode 工作流目录），并返回声明的参数。 |
 | `resume_zcode_workflow` | 续跑失败或取消的运行，复用已完成节点与已记录的子代理会话。 |
+
+### 服务契约（供其他插件使用）
+
+插件注册 Cordis 服务 **`zcodeWorkflow`**（`version` 0.2.3）。它是可选能力，本插件不依赖任何消费者；右侧栏、journal 与工具在没有消费者时照常工作。其他插件（如 `dsh-mcp-bridge`）通过 `ctx.get('zcodeWorkflow')` 发现它，不 import 本包。方法包括 `listRuns`、`getRun`、`progress`、`cancelRun`、`resumeRun`、`configureRun`（只改配置、绝不启动运行）、`deleteRun`、`getSessionPolicy`/`setSessionPolicy`。控制类方法必须带所属 `sessionId`；跨会话返回 `WORKFLOW_FORBIDDEN`，失败使用稳定的 `WORKFLOW_*` 错误码。插件卸载时服务自动注销。
 
 ### 右侧栏面板
 

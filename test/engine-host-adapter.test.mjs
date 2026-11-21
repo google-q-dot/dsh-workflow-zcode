@@ -13,6 +13,7 @@ import {
   createAgentRuntime,
   createChildProcess,
   resolveChildAgentOptions,
+  usageOfAssistantEvent,
   usageTokensOf,
 } from '../src/engine/host-adapter.mjs'
 
@@ -262,6 +263,9 @@ test('usage: totalTokens wins, otherwise the four buckets are summed', () => {
   assert.equal(usageTokensOf({ usage: { inputTokens: 3, outputTokens: 4, cacheReadTokens: 1, cacheWriteTokens: 2 } }), 10)
   assert.equal(usageTokensOf({ usage: {} }), 0)
   assert.equal(usageTokensOf({}), 0)
+  assert.equal(usageOfAssistantEvent({ data: { message: {}, usage: { totalTokens: 42 } } }), 42)
+  assert.equal(usageOfAssistantEvent({ data: { message: { usage: { totalTokens: 7 } } } }), 7)
+  assert.equal(usageOfAssistantEvent({ data: {} }), 0)
 })
 
 test('usage: every assistant message reports its delta to the sink', async () => {

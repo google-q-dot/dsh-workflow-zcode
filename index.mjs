@@ -33,6 +33,7 @@ import { executeRun } from './src/engine/run-service.mjs'
 import { createAgentRuntime, createChildProcess, createHostExec, resolveChildAgentOptions } from './src/engine/host-adapter.mjs'
 import { jsonSafe } from './src/engine/json.mjs'
 import { createTraceStore } from './src/engine/trace-projection.mjs'
+import { createWorkflowControlService, WorkflowServiceError, ZCODE_SERVICE_NAME } from './src/engine/control-service.mjs'
 
 export const name = 'dsh-workflow-zcode'
 
@@ -208,6 +209,23 @@ export function apply(ctx, config = {}) {
   ctx.tools.register(defineRunTool(ctx, settings, journal, { trackRun, untrackRun, activeRuns }))
   ctx.tools.register(defineResumeTool(ctx, settings, journal, { trackRun, untrackRun, activeRuns }))
   ctx.tools.register(defineListTool(ctx, settings))
+
+  // The optional public contract for other plugins (notably dsh-mcp-bridge).
+  // `ctx.provide` unregisters it with this plugin's fiber; the bridge never
+  // imports this package, it only probes the service name.
+  const control = createWorkflowControlService({
+    journal,
+    activeRuns,
+    launcher: {
+      resume: (runId, overrides) => startResumeFromUi({ ctx, settings, journal, tracking, runId, overrides }),
+    },
+    configure: (runId, overrides) => updateRunSettingsOnly({ journal, runId, overrides }),
+    sessionPolicy: {
+      get: (sessionId) => journal.isSessionAutoApproved(sessionId),
+      set: (sessionId, enabled) => journal.setSessionAutoApprove(sessionId, enabled),
+    },
+  })
+  if (typeof ctx.provide === 'function') ctx.provide(ZCODE_SERVICE_NAME, control)
 }
 
 function defineRunTool(ctx, settings, journal, tracking) {
@@ -513,6 +531,40 @@ async function startResumeFromUi({ ctx, settings, journal, tracking, runId, over
     }
   })
   return { runId, resumed: true, planned: true }
+}
+
+/**
+ * Update a settled run's plan/caps without starting it.
+ *
+ * This is the service counterpart of `configureRunFromUi`: the MCP caller asked
+ * for a configuration change, not for a new turn, so `resumeRun` is a separate
+ * action. Completed runs are rejected by the service because rewriting their
+ * plan would mix two attempts.
+ */
+function updateRunSettingsOnly({ journal, runId, overrides = {} }) {
+  const run = journal.getRun(runId)
+  if (run === undefined) throw new WorkflowServiceError('WORKFLOW_RUN_NOT_FOUND', `no run \`${runId}\` in this journal`)
+  if (run.status === 'running' || run.status === 'pending') {
+    throw new WorkflowServiceError('WORKFLOW_BAD_STATE', `run \`${runId}\` is ${run.status}; stop it before changing settings`)
+  }
+  if (run.status === 'completed') {
+    throw new WorkflowServiceError('WORKFLOW_BAD_STATE', `run \`${runId}\` completed; start a new workflow instead of rewriting it`)
+  }
+  if (run.plan === undefined || run.plan === null) {
+    throw new WorkflowServiceError('WORKFLOW_BAD_STATE', `run \`${runId}\` has no stored plan and cannot be configured`)
+  }
+  const { plan, changes } = applyPlanSettings(run.plan, overrides)
+  if (changes.length > 0) {
+    journal.updatePlan(runId, plan)
+    journal.setRunCaps(runId, plan.maxConcurrency ?? run.capsMaxConcurrency)
+    journal.appendEvent(runId, 'run-configured', { at: Date.now(), origin: 'mcp', changes })
+  }
+  return {
+    changed: changes.length > 0,
+    changes,
+    maxConcurrency: plan.maxConcurrency ?? run.capsMaxConcurrency,
+    subagentModel: plan.subagentModel?.label ?? null,
+  }
 }
 
 /**
@@ -1725,4 +1777,7 @@ export {
   registerRunRoutes,
   // Exported for the launch-path tests: these validate before spending a model call.
   startResumeFromUi, configureRunFromUi, resolveMaxConcurrency, resolveSubagentModel,
+  // Exported for the cross-plugin confirmation test: the bridge answers this
+  // exact `userQuestions.ask` call through dsh_respond_interaction.
+  confirmWorkflowExecution,
 }

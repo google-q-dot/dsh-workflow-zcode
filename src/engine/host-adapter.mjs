@@ -198,6 +198,10 @@ export function createChildProcess({ subprocess, cwd, signal, execPath = process
  * the protocol exposes. A missing/zero usage is normal (some providers omit it)
  * and must not invent a number.
  */
+export function usageOfAssistantEvent(event) {
+  return usageTokensOf({ usage: event?.data?.usage ?? event?.data?.message?.usage })
+}
+
 export function usageTokensOf(message) {
   const usage = message?.usage
   if (usage === null || typeof usage !== 'object') return 0
@@ -430,7 +434,9 @@ export function createAgentRuntime({ ctx, agents, subagents, parentAgent, cwd, a
       // Token usage arrives with the assistant message. Accumulate per session
       // and report the delta, so a run can settle with a real `spent_tokens`
       // instead of a hardcoded zero.
-      const delta = usageTokensOf(event.data?.message)
+      // The Host carries provider usage beside the message (`data.usage`), not
+      // inside `data.message`; reading only the message kept `spent_tokens` at 0.
+      const delta = usageOfAssistantEvent(event)
       if (delta > 0) {
         entry.tokens += delta
         try {
